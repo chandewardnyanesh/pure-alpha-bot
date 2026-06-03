@@ -13,7 +13,9 @@ from config import (
     MAX_DAILY_LOSS_PCT, BROKERAGE_PER_ORDER,
     OPTION_TARGET_MULT, OPTION_SL_MULT,
     OPTION_TRAIL_START, OPTION_TRAIL_LOCK,
-    INITIAL_CAPITAL,
+    INITIAL_CAPITAL, MAX_PREMIUM_PER_LOT,
+    ATR_STOP_MULT, ATR_TRAIL_TRIGGER, ATR_TRAIL_DIST,
+    POSITION_SIZE_4_OF_5,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,16 +67,27 @@ class RiskManager:
     def calculate_option_position(self, contract: dict) -> dict:
         """
         contract: output from OptionsManager.select_option_contract()
-        Returns a full position dict ready for execution.
+        Returns a full position dict ready for execution, or None if premium
+        exceeds MAX_PREMIUM_PER_LOT (prevents Trade-6 type ₹937×30=₹28k positions).
         """
         premium   = contract["premium"]
         lot_size  = contract["lot_size"]
         lot_cost  = premium * lot_size
         max_lots  = contract["max_lots"]
 
+        # ── Premium cap: skip if option is too expensive per lot ──────────────
+        if premium > MAX_PREMIUM_PER_LOT:
+            logger.warning(
+                f"SKIPPED {contract.get('tradingsymbol','?')}: "
+                f"premium ₹{premium:.0f} > MAX_PREMIUM_PER_LOT ₹{MAX_PREMIUM_PER_LOT}"
+            )
+            return None
+
         # How much capital are we willing to deploy?
-        budget    = self.current_capital * MAX_CAPITAL_PER_TRADE_PCT / 100
-        lots      = min(max_lots, max(1, int(budget / lot_cost)))
+        # position_pct comes from Layer 6 (consensus-based sizing)
+        pct    = contract.get("position_pct", POSITION_SIZE_4_OF_5)
+        budget = self.current_capital * pct / 100
+        lots   = min(max_lots, max(1, int(budget / lot_cost)))
 
         total_cost = lots * lot_cost
         charges    = BROKERAGE_PER_ORDER * 2    # entry + exit
@@ -84,6 +97,20 @@ class RiskManager:
         target_premium = round(premium * (1 + OPTION_TARGET_MULT), 2)
         trail_trigger  = round(premium * (1 + OPTION_TRAIL_START), 2)
         trail_lock     = round(premium * (1 + OPTION_TRAIL_LOCK),  2)
+
+        # Layer 7: ATR-based spot-price stop (more adaptive than fixed % premium)
+        entry_spot = contract.get("spot_price", 0)
+        entry_atr  = contract.get("entry_atr", 0)
+        if entry_spot > 0 and entry_atr > 0:
+            if contract["signal_action"] == "BUY":   # CE — stop below entry spot
+                atr_stop_spot  = entry_spot - ATR_STOP_MULT * entry_atr
+                atr_trail_peak = entry_spot             # track highest spot for trail
+            else:                                       # PE — stop above entry spot
+                atr_stop_spot  = entry_spot + ATR_STOP_MULT * entry_atr
+                atr_trail_peak = entry_spot             # track lowest spot for trail
+        else:
+            atr_stop_spot  = None
+            atr_trail_peak = None
 
         return {
             "tradingsymbol":    contract["tradingsymbol"],
@@ -106,8 +133,12 @@ class RiskManager:
             "charges":          charges,
             "max_loss":         round(total_cost + charges, 2),
             "signal_action":    contract["signal_action"],
-            "spot_at_entry":    contract["spot_price"],
+            "spot_at_entry":    entry_spot,
+            "entry_atr":        entry_atr,
+            "atr_stop_spot":    atr_stop_spot,      # Layer 7: ATR stop on underlying
+            "atr_trail_peak":   atr_trail_peak,     # Layer 7: peak spot for trailing
             "days_to_expiry":   contract["days_to_expiry"],
+            "position_pct":     pct,                # Layer 6: sizing used
         }
 
     # ─── Options Exit Logic ───────────────────────────────────────────────────
@@ -122,6 +153,56 @@ class RiskManager:
             else:
                 pos["trailing_sl"] = max(pos["trailing_sl"], new_trail)
         return pos
+
+    def check_atr_stop(self, pos: dict, current_spot: float) -> tuple[bool, str]:
+        """
+        Layer 7: ATR-based stop on underlying index.
+        More adaptive than fixed % of premium — accounts for actual volatility.
+        Also handles ATR trailing stop on the underlying.
+        """
+        if pos.get("atr_stop_spot") is None or current_spot <= 0:
+            return False, ""
+
+        action = pos.get("signal_action", "BUY")
+        entry_atr = pos.get("entry_atr", 0)
+
+        if action == "BUY":    # holding CE — stop if spot falls below ATR stop
+            # Update trailing peak
+            if pos.get("atr_trail_peak") is not None:
+                if current_spot > pos["atr_trail_peak"]:
+                    pos["atr_trail_peak"] = current_spot
+                    # Ratchet up the ATR stop
+                    gain = current_spot - pos["spot_at_entry"]
+                    if gain >= ATR_TRAIL_TRIGGER * entry_atr:
+                        new_stop = current_spot - ATR_TRAIL_DIST * entry_atr
+                        if new_stop > pos["atr_stop_spot"]:
+                            pos["atr_stop_spot"] = new_stop
+                            logger.info(
+                                f"ATR trail ratcheted → stop now {new_stop:.0f} "
+                                f"(spot={current_spot:.0f})"
+                            )
+
+            if current_spot <= pos["atr_stop_spot"]:
+                return True, f"atr_stop(spot={current_spot:.0f}<{pos['atr_stop_spot']:.0f})"
+
+        else:   # holding PE — stop if spot rises above ATR stop
+            if pos.get("atr_trail_peak") is not None:
+                if current_spot < pos["atr_trail_peak"]:
+                    pos["atr_trail_peak"] = current_spot
+                    drop = pos["spot_at_entry"] - current_spot
+                    if drop >= ATR_TRAIL_TRIGGER * entry_atr:
+                        new_stop = current_spot + ATR_TRAIL_DIST * entry_atr
+                        if new_stop < pos["atr_stop_spot"]:
+                            pos["atr_stop_spot"] = new_stop
+                            logger.info(
+                                f"ATR trail ratcheted → stop now {new_stop:.0f} "
+                                f"(spot={current_spot:.0f})"
+                            )
+
+            if current_spot >= pos["atr_stop_spot"]:
+                return True, f"atr_stop(spot={current_spot:.0f}>{pos['atr_stop_spot']:.0f})"
+
+        return False, ""
 
     def should_exit_option(self, pos: dict, current_premium: float) -> tuple[bool, str]:
         if current_premium <= pos["sl_premium"]:

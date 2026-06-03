@@ -6,6 +6,7 @@ data/bot.pid
 # ─── Runtime data (personal trade history & sessions) ─────────────────────────
 data/trades.db
 data/*.db
+data/status.json
 
 # ─── Logs ─────────────────────────────────────────────────────────────────────
 logs/

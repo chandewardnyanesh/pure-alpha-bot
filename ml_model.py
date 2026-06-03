@@ -125,21 +125,22 @@ class TradingModel:
     def _update_strategy_weights(self, importances: np.ndarray):
         """
         Map feature importances back to strategy weights.
-        Features are in the same order as FEATURE_COLS + 3 engineered.
-        We use domain knowledge to assign each feature to a strategy.
+        Updated feature map (16 base features + 2 extra = 18 total):
+          rsi(0), macd_hist(1), bb_pct(2), ema_cross(3), supertrend_dir(4),
+          vol_ratio(5), momentum(6), atr(7), atr_ratio(8), bb_squeeze(9),
+          vwap_dist(10), close_vs_ema_fast(11), ema_fast_vs_slow(12),
+          time_sin(13), time_cos(14), fvg_signal(15),
+          agreement_count(16), kronos_score(17)
         """
-        n = len(FEATURE_COLS) + 3       # total features returned by extract_features
+        n = 18      # total features from extract_features(row, extra={...})
         imp = importances[:n] if len(importances) >= n else importances
 
-        # Strategy-to-feature affinity (indices in extract_features output)
-        # rsi(0), macd_hist(1), bb_pct(2), ema_cross(3), supertrend_dir(4),
-        # vol_ratio(5), momentum(6), atr(7),
-        # vwap_dist(8), close_vs_ema_fast(9), ema_fast_vs_slow(10)
         affinity = {
-            "ema_crossover":  [3, 9, 10],
-            "vwap_reversion": [0, 2, 8],
-            "supertrend":     [4, 7],
+            "ema_crossover":  [3, 11, 12],
+            "vwap_reversion": [0, 2, 10],
+            "supertrend":     [4, 7, 8],
             "breakout":       [5, 6, 1],
+            "fvg":            [15, 9],
         }
 
         raw = {}
