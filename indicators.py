@@ -334,9 +334,27 @@ def extract_features(row: pd.Series, extra: dict = None) -> np.ndarray:
         fvg_signal = -1.0
     feats.append(fvg_signal)   # 15: fvg_signal
 
-    # Extra context passed in from bot (agreement_count, kronos_score)
+    # Session bucket: encode time-of-day as categorical bucket (better than sin/cos alone)
+    # 0=pre_market, 1=morning_momentum(9:25-11:30), 2=dead_zone(11:30-13:00),
+    # 3=afternoon_recovery(13:00-14:30), 4=power_hour(14:30-15:10)
+    now_min = now.hour * 60 + now.minute
+    if now_min < 9 * 60 + 25:
+        session_bucket = 0.0
+    elif now_min < 11 * 60 + 30:
+        session_bucket = 1.0   # best entry window
+    elif now_min < 13 * 60:
+        session_bucket = 2.0   # dead zone — lowest WR
+    elif now_min < 14 * 60 + 30:
+        session_bucket = 3.0
+    else:
+        session_bucket = 4.0
+    feats.append(session_bucket)   # 16: session_bucket
+
+    # Extra context passed in from bot (agreement_count, kronos_score, vix, htf_alignment)
     if extra:
-        feats.append(float(extra.get("agreement_count", 0)))   # 16
-        feats.append(float(extra.get("kronos_score", 0.5)))    # 17
+        feats.append(float(extra.get("agreement_count", 0)))      # 17
+        feats.append(float(extra.get("kronos_score", 0.5)))       # 18
+        feats.append(float(extra.get("vix", 15.0)))               # 19: India VIX level
+        feats.append(float(extra.get("htf_alignment", 0.5)))      # 20: HTF voter confidence
 
     return np.array(feats, dtype=np.float32)

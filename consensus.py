@@ -16,7 +16,7 @@ Layer 6 (Position Sizing) is also handled here:
 import logging
 from config import (
     CONSENSUS_VOTES_REQUIRED, N_VOTERS,
-    POSITION_SIZE_3_OF_5, POSITION_SIZE_4_OF_5, POSITION_SIZE_5_OF_5,
+    POSITION_SIZE_4_OF_6, POSITION_SIZE_5_OF_6, POSITION_SIZE_6_OF_6,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,19 +65,19 @@ def run_consensus(voter_results: dict, proposed_action: str) -> dict:
     agreeing_confs = [v["confidence"] for v in voters if v["vote"] == proposed_action]
     avg_confidence = float(sum(agreeing_confs) / len(agreeing_confs)) if agreeing_confs else 0.0
 
-    # Layer 6: Position sizing based on agreement level
+    # Layer 6: Position sizing based on agreement level (6-voter system)
     if unanimity:
-        position_pct = POSITION_SIZE_5_OF_5    # 35%
-        sizing_note  = f"5/5 unanimous → {position_pct:.0f}% capital"
-    elif votes_for >= 4:
-        position_pct = POSITION_SIZE_4_OF_5    # 20%
-        sizing_note  = f"4/5 agree → {position_pct:.0f}% capital"
+        position_pct = POSITION_SIZE_6_OF_6    # 35%
+        sizing_note  = f"6/6 unanimous → {position_pct:.0f}% capital"
+    elif votes_for >= 5:
+        position_pct = POSITION_SIZE_5_OF_6    # 22%
+        sizing_note  = f"5/6 agree → {position_pct:.0f}% capital"
     elif votes_for >= CONSENSUS_VOTES_REQUIRED:
-        position_pct = POSITION_SIZE_3_OF_5    # 15% (conservative while Kronos offline)
-        sizing_note  = f"3/5 agree → {position_pct:.0f}% capital (Kronos offline)"
+        position_pct = POSITION_SIZE_4_OF_6    # 15%
+        sizing_note  = f"4/6 agree → {position_pct:.0f}% capital"
     else:
         position_pct = 0.0
-        sizing_note  = f"only {votes_for}/5 — no trade"
+        sizing_note  = f"only {votes_for}/6 — no trade"
 
     summary = (
         f"{proposed_action} | votes={votes_for}/{N_VOTERS} "

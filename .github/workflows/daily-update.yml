@@ -1,0 +1,61 @@
+name: Daily Progress Update
+
+on:
+  schedule:
+    # Runs at 16:00 IST (10:30 UTC) — 30 min after NSE market close
+    - cron: '30 10 * * 1-5'   # Mon–Fri only
+  workflow_dispatch:           # allow manual trigger
+
+jobs:
+  daily-commit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Generate daily progress note
+        run: |
+          DATE=$(date '+%Y-%m-%d')
+          DAY=$(date '+%A')
+          FILE="progress/${DATE}.md"
+          mkdir -p progress
+
+          cat > "$FILE" << EOF
+          # Daily Progress — ${DATE} (${DAY})
+
+          ## Bot Status
+          - Architecture: PureAlpha Bot v2 (6-voter, Dalio-inspired)
+          - Target: WR 55-65% | RR 1:2 | Expectancy +0.65
+
+          ## Today's Notes
+          > Auto-generated. Update manually with trade outcomes and observations.
+
+          ## Checklist
+          - [ ] Reviewed today's signals
+          - [ ] Checked voter win rates
+          - [ ] Reviewed rolling expectancy
+          - [ ] Any config adjustments needed?
+          EOF
+
+          echo "Progress file created: $FILE"
+
+      - name: Commit and push
+        run: |
+          git config user.name  "PureAlpha Bot"
+          git config user.email "chandewardnyanesh@gmail.com"
+
+          git add progress/
+          git diff --cached --quiet && echo "Nothing to commit" && exit 0
+
+          git commit -m "chore: daily progress log $(date '+%Y-%m-%d')"
+          git push

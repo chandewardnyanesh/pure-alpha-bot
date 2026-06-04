@@ -10,7 +10,7 @@ import logging
 import pandas as pd
 from datetime import datetime, timedelta
 from kiteconnect import KiteConnect
-from config import LIVE_INTERVAL, HISTORICAL_DAYS, OPTION_UNDERLYINGS
+from config import LIVE_INTERVAL, HISTORICAL_DAYS, OPTION_UNDERLYINGS, HTF_INTERVAL
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +108,10 @@ class DataFetcher:
         return df
 
     # ─── Refresh (incremental) ────────────────────────────────────────────────
+
+    def refresh_htf(self, symbol: str) -> pd.DataFrame:
+        """Fetch and cache 15-minute candles for HTF alignment voter."""
+        return self.refresh(symbol, interval=HTF_INTERVAL)
 
     def refresh(self, symbol: str, interval: str = LIVE_INTERVAL) -> pd.DataFrame:
         today_df = self.fetch_today(symbol, interval)

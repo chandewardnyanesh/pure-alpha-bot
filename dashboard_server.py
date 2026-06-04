@@ -30,7 +30,7 @@ HTML = """
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>AI Options Bot — Live Dashboard</title>
+  <title>PureAlpha Bot — Live Dashboard</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   <style>
@@ -67,7 +67,7 @@ HTML = """
 <!-- ── Header ─────────────────────────────────────────────────────────────── -->
 <div class="flex items-center justify-between mb-4">
   <div class="flex items-center gap-3">
-    <div class="text-2xl font-bold text-white">🤖 AI Options Bot</div>
+    <div class="text-2xl font-bold text-white">📈 PureAlpha Bot</div>
     <div id="bot-status" class="px-3 py-1 rounded-full text-sm font-semibold bg-green-900 text-green-300 pulse">
       ● LIVE
     </div>
@@ -121,7 +121,7 @@ HTML = """
     <div id="layer4" class="layer-warn rounded-lg p-2 text-center">
       <div class="text-xs font-bold text-yellow-400">L4</div>
       <div class="text-xs text-gray-300">Consensus</div>
-      <div id="votes-display" class="text-xs font-mono text-yellow-300">—/5</div>
+      <div id="votes-display" class="text-xs font-mono text-yellow-300">—/6</div>
     </div>
     <div id="layer5" class="layer-ok rounded-lg p-2 text-center">
       <div class="text-xs font-bold text-green-400">L5</div>
@@ -142,7 +142,7 @@ HTML = """
 
 <!-- ── 5 Voters Panel ─────────────────────────────────────────────────────── -->
 <div class="card mb-4">
-  <div class="text-sm font-semibold text-gray-300 mb-3">🗳️ 5 Voters — Current Reading</div>
+  <div class="text-sm font-semibold text-gray-300 mb-3">🗳️ 6 Voters — Current Reading</div>
   <div class="flex flex-wrap gap-2" id="voters-panel">
     <div class="voter-card voter-abs"><div class="text-xs font-bold text-gray-400">Trend</div><div class="text-xs text-gray-500">Loading...</div></div>
     <div class="voter-card voter-abs"><div class="text-xs font-bold text-gray-400">Reversion</div><div class="text-xs text-gray-500">Loading...</div></div>
@@ -205,7 +205,7 @@ HTML = """
 </div>
 
 <div class="text-center text-xs text-gray-600 mt-4">
-  AI Options Bot — Paper Trade Mode | Auto-refreshes every 5s
+  PureAlpha Bot — Dalio-Inspired NSE Options | Auto-refreshes every 5s
 </div>
 
 <!-- ── JavaScript ─────────────────────────────────────────────────────────── -->
@@ -274,9 +274,9 @@ function renderDashboard(d) {
   // Layer 4 — Consensus
   const votes = d.last_consensus || {};
   const vFor  = votes.votes_for || 0;
-  document.getElementById('votes-display').textContent = vFor + '/5';
+  document.getElementById('votes-display').textContent = vFor + '/6';
   const l4 = document.getElementById('layer4');
-  l4.className = (vFor >= 4 ? 'layer-ok' : vFor >= 2 ? 'layer-warn' : 'layer-off') +
+  l4.className = (vFor >= 4 ? 'layer-ok' : vFor >= 3 ? 'layer-warn' : 'layer-off') +
                  ' rounded-lg p-2 text-center';
 
   // Layer 5 — Market filter
@@ -467,7 +467,7 @@ def write_status(payload: dict):
 
 if __name__ == "__main__":
     print(f"\n{'='*50}")
-    print(f"  Trading Bot Dashboard")
+    print(f"  PureAlpha Bot Dashboard")
     print(f"  http://{DASHBOARD_HOST}:{DASHBOARD_PORT}")
     print(f"{'='*50}\n")
     app.run(host=DASHBOARD_HOST, port=DASHBOARD_PORT, debug=False, use_reloader=False)

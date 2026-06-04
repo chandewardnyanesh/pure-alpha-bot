@@ -15,7 +15,9 @@ from config import (
     OPTION_TRAIL_START, OPTION_TRAIL_LOCK,
     INITIAL_CAPITAL, MAX_PREMIUM_PER_LOT,
     ATR_STOP_MULT, ATR_TRAIL_TRIGGER, ATR_TRAIL_DIST,
-    POSITION_SIZE_4_OF_5,
+    POSITION_SIZE_4_OF_6,
+    PARTIAL_EXIT_ENABLED, PARTIAL_EXIT_TRIGGER, PARTIAL_EXIT_FRACTION,
+    PARTIAL_BREAKEVEN_AFTER, PARTIAL_BREAKEVEN_BUFF,
 )
 
 logger = logging.getLogger(__name__)
@@ -122,6 +124,7 @@ class RiskManager:
             "expiry":           str(contract["expiry"]),
             "lot_size":         lot_size,
             "lots":             lots,
+            "remaining_lots":   lots,   # decremented on partial exits
             "qty":              lots * lot_size,
             "entry_premium":    premium,
             "sl_premium":       sl_premium,
@@ -202,6 +205,36 @@ class RiskManager:
             if current_spot >= pos["atr_stop_spot"]:
                 return True, f"atr_stop(spot={current_spot:.0f}>{pos['atr_stop_spot']:.0f})"
 
+        return False, ""
+
+    def check_partial_exit(self, pos: dict, current_premium: float) -> tuple[bool, str]:
+        """
+        Check if partial exit conditions are met (1R profit reached).
+        Returns (should_partial: bool, reason: str).
+        Sets pos["partial_done"] = True after first trigger so it only fires once.
+        Also upgrades SL to breakeven after partial.
+        """
+        if not PARTIAL_EXIT_ENABLED:
+            return False, ""
+        if pos.get("partial_done"):
+            return False, ""
+        if pos.get("remaining_lots", pos["lots"]) <= 1:
+            return False, ""   # only 1 lot left — skip partial, let full exit handle it
+
+        trigger = pos["entry_premium"] * (1 + PARTIAL_EXIT_TRIGGER)
+        if current_premium >= trigger:
+            pos["partial_done"] = True
+            # Move SL to breakeven + small buffer
+            if PARTIAL_BREAKEVEN_AFTER:
+                be_sl = round(pos["entry_premium"] * (1 + PARTIAL_BREAKEVEN_BUFF), 2)
+                if be_sl > pos["sl_premium"]:   # only ratchet up, never down
+                    pos["sl_premium"] = be_sl
+                    logger.info(
+                        f"[PARTIAL] SL moved to breakeven+ ₹{be_sl:.2f} "
+                        f"for {pos['tradingsymbol']}"
+                    )
+            lots_to_sell = max(1, int(pos["remaining_lots"] * PARTIAL_EXIT_FRACTION))
+            return True, f"partial_1R(lots={lots_to_sell})"
         return False, ""
 
     def should_exit_option(self, pos: dict, current_premium: float) -> tuple[bool, str]:

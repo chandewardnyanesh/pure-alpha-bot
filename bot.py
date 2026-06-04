@@ -1,13 +1,19 @@
 """
-AI Options Bot — 7-Layer Architecture
-======================================
-Layer 1: Indicators  — SuperTrend, RSI, MACD, Volume, ATR, ADX
-Layer 2: Forecasting — Kronos (NeoQuasar DL price forecast)
-Layer 3: ML Ensemble — XGBoost + RandomForest + LightGBM
-Layer 4: Consensus   — 4/5 voters must agree (PDF key finding: 5/5=67% WR)
-Layer 5: Mkt Filter  — ATR ratio + ADX + Volume gate
-Layer 6: Sizing      — Confidence-based: 4/5=20%, 5/5=35% of capital
-Layer 7: Risk        — ATR stop on underlying + ATR trailing stop
+PureAlpha Bot — Dalio-Inspired 6-Layer Architecture
+=====================================================
+Named after Ray Dalio's Pure Alpha strategy at Bridgewater Associates.
+Applies systematic, principles-based, multi-signal consensus trading
+to NSE intraday options — mirroring Dalio's all-weather, uncorrelated
+signal approach but adapted for Indian equity derivatives.
+
+Layer 1: Data        — 5-min + 15-min OHLCV, India VIX
+Layer 2: Signals     — 6 independent voters (Trend, Reversion, Breakout,
+                       Kronos, ML-Ensemble, HTF-Alignment)
+Layer 3: Filter      — VIX regime, session dead zone, ATR/ADX/Volume gate
+Layer 4: Consensus   — 4/6 voters must agree (Dalio principle: diversified,
+                       uncorrelated confirmation before conviction)
+Layer 5: Sizing      — Conviction-based: 4/6=15%, 5/6=22%, 6/6=35%
+Layer 6: Risk        — ATR stop + trailing + partial exit at 1R
 
 Run: python bot.py [--paper]
 """
@@ -30,19 +36,21 @@ from config import (
     USE_KRONOS_FILTER, KRONOS_LOOKBACK,
     CONSENSUS_VOTES_REQUIRED,
     STATUS_FILE,
+    USE_VIX_FILTER, VIX_SYMBOL,
 )
 from broker          import Broker
 from data_fetcher    import DataFetcher
 from indicators      import compute_all, extract_features
 from signal_layers   import run_all_voters, VOTE_BUY, VOTE_SELL
 from consensus       import run_consensus
-from market_filter   import check_market_filter, filter_status
+from market_filter   import check_market_filter, filter_status, update_vix, get_vix_size_multiplier
 from ml_ensemble     import MLEnsemble
 from options_manager import OptionsManager
 from risk_manager    import RiskManager
 from kronos_filter   import KronosFilter
 from dashboard_server import write_status
 import trade_logger as tl
+from trade_logger import get_rolling_expectancy, get_voter_win_rates, get_session_breakdown
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
@@ -76,15 +84,15 @@ def squareoff_due() -> bool:
 
 # ─── Trading Bot ──────────────────────────────────────────────────────────────
 
-class OptionsBot:
+class PureAlphaBot:
     def __init__(self, paper_trade: bool = False):
         self.paper = paper_trade
         logger.info("=" * 70)
-        logger.info(f"  AI OPTIONS BOT  |  7-Layer Architecture  |  paper={paper_trade}")
+        logger.info(f"  PUREALPHA BOT  |  Dalio-Inspired 6-Layer Architecture  |  paper={paper_trade}")
         logger.info(f"  {date.today()}   Capital: ₹{INITIAL_CAPITAL:,.0f} → Target: ₹10,00,000")
         logger.info("=" * 70)
-        logger.info("  L1:Indicators  L2:Kronos  L3:ML-Ensemble  L4:Consensus(4/5)")
-        logger.info("  L5:MktFilter   L6:Sizing  L7:ATR-Risk")
+        logger.info("  L1:Data(5m+15m+VIX)  L2:6-Voters  L3:Filter(VIX+Session+ATR)")
+        logger.info("  L4:Consensus(4/6)    L5:Sizing    L6:ATR-Risk+PartialExit")
         logger.info("=" * 70)
 
         tl.init_db()
@@ -143,6 +151,13 @@ class OptionsBot:
             logger.warning(f"{name}: data fetch error — {e}")
             return
 
+        # ── Layer 1b: HTF (15-min) data for voter 6 ───────────────────────────
+        df_htf = None
+        try:
+            df_htf = self.fetcher.refresh_htf(index_symbol)
+        except Exception as e:
+            logger.debug(f"{name}: HTF fetch error — {e}")
+
         if len(df) < 60:
             return
 
@@ -178,18 +193,26 @@ class OptionsBot:
         # (handled inside kronos_voter via signal_layers)
 
         # ── Layer 3: ML Ensemble probability ─────────────────────────────────
-        extra    = {"agreement_count": 0, "kronos_score": 0.5}
+        from market_filter import _current_vix
+        htf_conf = 0.5
+        if df_htf is not None and len(df_htf) >= 3:
+            from signal_layers import htf_voter
+            _htf_v = htf_voter(df_htf)
+            htf_conf = _htf_v["confidence"] if _htf_v["vote"] != "ABSTAIN" else 0.5
+        extra    = {"agreement_count": 0, "kronos_score": 0.5,
+                    "vix": _current_vix, "htf_alignment": htf_conf}
         features = extract_features(row, extra=extra)
         ml_proba = self.ml.predict_success_proba(features)
 
         # ── Layers 1-3: Run all 5 voters ─────────────────────────────────────
-        logger.info(f"[VOTE]  {name} proposed={proposed} — running 5 voters...")
+        logger.info(f"[VOTE]  {name} proposed={proposed} — running 6 voters...")
         voter_results = run_all_voters(
             df              = df,
             proposed_action = proposed,
             kronos_filter   = self.kronos,
             ml_ensemble     = self.ml,
             features        = features,
+            df_htf          = df_htf,
         )
         self._last_voters = voter_results["voters"]
 
@@ -250,8 +273,14 @@ class OptionsBot:
         if not contract:
             return
 
+        # Apply VIX regime multiplier to position size
+        vix_mult = get_vix_size_multiplier()
+        position_pct_adj = round(position_pct * vix_mult, 1)
+        if vix_mult < 1.0:
+            logger.info(f"[VIX] Size reduced: {position_pct:.0f}% → {position_pct_adj:.0f}% (vix_mult={vix_mult:.2f})")
+
         # Inject Layer 6 position sizing + Layer 7 ATR data into contract
-        contract["position_pct"] = position_pct
+        contract["position_pct"] = position_pct_adj
         contract["entry_atr"]    = float(row.get("atr", 0) or 0)
 
         # ── Layer 7: Calculate position with ATR-based SL ────────────────────
@@ -260,7 +289,8 @@ class OptionsBot:
             return
 
         # Enrich features with actual agreement count for ML logging
-        extra    = {"agreement_count": consensus["votes_for"], "kronos_score": 0.5}
+        extra    = {"agreement_count": consensus["votes_for"], "kronos_score": 0.5,
+                    "vix": _current_vix, "htf_alignment": htf_conf}
         features = extract_features(row, extra=extra)
 
         self._enter(pos, features, consensus, ml_proba)
@@ -345,6 +375,11 @@ class OptionsBot:
         if current_premium <= 0:
             return
 
+        # ── Partial exit at 1R (before trail/SL checks) ──────────────────────
+        should_partial, partial_reason = self.risk_mgr.check_partial_exit(pos, current_premium)
+        if should_partial:
+            self._partial_exit(symbol, current_premium, partial_reason)
+
         # Premium-based trail and SL
         pos = self.risk_mgr.update_option_trail(pos, current_premium)
         exit_, reason = self.risk_mgr.should_exit_option(pos, current_premium)
@@ -378,6 +413,48 @@ class OptionsBot:
 
         if exit_:
             self._exit(symbol, current_premium, reason)
+
+    # ─── Partial exit (sell 50% at 1R, move SL to breakeven) ─────────────────
+
+    def _partial_exit(self, symbol: str, exit_premium: float, reason: str):
+        entry = self.active.get(symbol)
+        if not entry:
+            return
+
+        pos      = entry["pos"]
+        exchange = pos["exchange"]
+        lot_size = pos["lot_size"]
+        remaining = pos.get("remaining_lots", pos["lots"])
+        lots_to_sell = max(1, int(remaining * 0.50))
+        qty_to_sell  = lots_to_sell * lot_size
+
+        if not self.paper:
+            try:
+                self.broker.sell_option(
+                    tradingsymbol = symbol,
+                    exchange      = exchange,
+                    qty           = qty_to_sell,
+                    tag           = "BOT_PARTIAL",
+                )
+            except Exception as e:
+                logger.error(f"Partial exit failed for {symbol}: {e}")
+                return
+        else:
+            partial_pnl = (exit_premium - pos["entry_premium"]) * qty_to_sell
+            logger.info(
+                f"[PAPER][PARTIAL] SELL {lots_to_sell} lots {symbol} "
+                f"@ ₹{exit_premium:.2f} — {reason} — pnl=₹{partial_pnl:+.2f}"
+            )
+
+        pos["remaining_lots"] = remaining - lots_to_sell
+        pos["qty"]            = pos["remaining_lots"] * lot_size
+        partial_pnl = (exit_premium - pos["entry_premium"]) * qty_to_sell
+        self.risk_mgr.record_pnl(partial_pnl)
+        logger.info(
+            f"PARTIAL  {symbol} {lots_to_sell}lots @ ₹{exit_premium:.2f} "
+            f"| {reason} | pnl=₹{partial_pnl:+.2f} "
+            f"| remaining={pos['remaining_lots']} lots"
+        )
 
     # ─── Exit trade ───────────────────────────────────────────────────────────
 
@@ -448,10 +525,27 @@ class OptionsBot:
         tl.save_daily_summary(self.capital_at_open, cap)
         stats = tl.get_performance_summary()
 
+        rolling   = get_rolling_expectancy(window=20)
+        voter_wrs = get_voter_win_rates()
+        sessions  = get_session_breakdown()
+
         logger.info(f"Day PnL  : ₹{self.risk_mgr.daily_pnl:+,.2f}")
         logger.info(f"Capital  : ₹{self.risk_mgr.current_capital:,.2f}")
         logger.info(f"All-time : {stats}")
         logger.info(f"ML       : {self.ml.summary()}")
+        logger.info(
+            f"[EXPECTANCY] rolling-20: {rolling['expectancy']:+.2f} "
+            f"WR={rolling.get('win_rate',0):.1%} "
+            f"{'✅ ON TARGET' if rolling.get('on_target') else '⚠️ BELOW TARGET (0.65)'}"
+        )
+        if voter_wrs:
+            logger.info("[VOTER WR] " + " | ".join(
+                f"{k}:{v['win_rate']:.0%}({v['votes']}t)" for k, v in voter_wrs.items()
+            ))
+        if sessions:
+            logger.info("[SESSIONS] " + " | ".join(
+                f"{k}:{v['win_rate']:.0%}({v['trades']}t)" for k, v in sessions.items()
+            ))
         self.squaredoff = True
 
     # ─── Dashboard status writer ──────────────────────────────────────────────
@@ -472,6 +566,9 @@ class OptionsBot:
                 "qty":     pos["qty"],
             })
 
+        rolling  = get_rolling_expectancy(window=20)
+        voter_wr = get_voter_win_rates()
+
         write_status({
             "capital":        st["capital"],
             "day_pnl":        st["daily_pnl"],
@@ -481,6 +578,9 @@ class OptionsBot:
             "total_trades":   perf.get("total", 0),
             "wins":           perf.get("wins", 0),
             "losses":         perf.get("losses", 0),
+            "expectancy":     rolling.get("expectancy", 0),
+            "expectancy_on_target": rolling.get("on_target", False),
+            "voter_win_rates": voter_wr,
             "signal_log":     self._signal_log[-20:],
             "last_voters":    self._last_voters,
             "last_consensus": self._last_consensus,
@@ -515,6 +615,16 @@ class OptionsBot:
                 time.sleep(300)
                 continue
 
+            # ── Fetch and cache India VIX for regime filter ───────────────────
+            if USE_VIX_FILTER:
+                try:
+                    vix_data = self.broker.kite.ltp([VIX_SYMBOL])
+                    vix_val  = float(vix_data[VIX_SYMBOL]["last_price"])
+                    update_vix(vix_val)
+                    logger.debug(f"India VIX: {vix_val:.2f}")
+                except Exception as e:
+                    logger.debug(f"VIX fetch failed: {e}")
+
             for cfg in OPTION_UNDERLYINGS:
                 if not self.running:
                     break
@@ -539,10 +649,10 @@ class OptionsBot:
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="AI Options Bot — 7-Layer Architecture")
+    parser = argparse.ArgumentParser(description="PureAlpha Bot — Dalio-Inspired NSE Options")
     parser.add_argument("--paper", action="store_true",
                         help="Paper trade mode — no real orders placed")
     args = parser.parse_args()
 
-    bot = OptionsBot(paper_trade=args.paper)
+    bot = PureAlphaBot(paper_trade=args.paper)
     bot.run()

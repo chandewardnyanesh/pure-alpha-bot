@@ -49,20 +49,35 @@ AGREEMENT_STRIKE_THRESH = 4      # agreement count ≥ this → auto upgrade to 
 SKIP_EXPIRY_DAYS_BEFORE = 2
 
 # ─── Options P&L Management ───────────────────────────────────────────────────
-OPTION_TARGET_MULT  = 0.80   # exit when premium +80% of entry
-OPTION_SL_MULT      = 0.40   # exit when premium -40% of entry
-OPTION_TRAIL_START  = 0.35   # activate trail once premium +35%
-OPTION_TRAIL_LOCK   = 0.15   # once trail active, lock in +15% floor
-OPTION_MIDDAY_SL    = 0.20   # tightened from 0.30 — cut if down 20% after 12:00
-                             # prevents EOD bagholding (Trade-2 lost ₹4,094 holding all day)
-MIDDAY_CUT_HOUR     = "12:00"  # was implicit 13:00, now explicit and earlier
+# Risk:Reward = 1:2  →  SL = -40% of premium, Target = +80% of premium
+OPTION_TARGET_MULT  = 0.80   # full exit when premium +80% of entry (2R)
+OPTION_SL_MULT      = 0.40   # exit when premium -40% of entry (1R risk)
+OPTION_TRAIL_START  = 0.50   # activate trail once premium +50% (raised from 0.35)
+OPTION_TRAIL_LOCK   = 0.20   # once trail active, lock in +20% floor (raised from 0.15)
+OPTION_MIDDAY_SL    = 0.20   # cut if down 20% after 12:00
+MIDDAY_CUT_HOUR     = "12:00"
+
+# Partial exit: sell 50% of position at 1R profit, then move SL to breakeven.
+# This locks in guaranteed profit on half the position and removes downside
+# on the rest — mathematically raises expectancy without cutting winners early.
+PARTIAL_EXIT_ENABLED    = True
+PARTIAL_EXIT_TRIGGER    = 0.40   # take 50% off when premium up 40% (= 1R)
+PARTIAL_EXIT_FRACTION   = 0.50   # sell this fraction of remaining lots
+PARTIAL_BREAKEVEN_AFTER = True   # after partial exit, move SL to entry premium + small buffer
+PARTIAL_BREAKEVEN_BUFF  = 0.05   # move SL to entry * (1 + 0.05) after partial (slight positive)
 
 # ─── Time Windows ─────────────────────────────────────────────────────────────
 MARKET_OPEN         = "09:15"
 MARKET_CLOSE        = "15:30"
 SQUARE_OFF_TIME     = "15:10"   # mandatory exit before this
 NO_ENTRY_AFTER      = "13:00"   # no new positions after 13:00 (was 14:00)
-NO_ENTRY_BEFORE     = "09:20"   # skip first 5-min noise candle
+NO_ENTRY_BEFORE     = "09:25"   # skip first 10-min noise (was 09:20)
+
+# Dead zone: 11:30–13:00 is typically low-momentum chop on NSE.
+# Trades entered here fail significantly more often — block new entries.
+SESSION_DEADZONE_START = "11:30"
+SESSION_DEADZONE_END   = "13:00"
+USE_SESSION_DEADZONE   = True
 COUNTER_SIGNAL_EXIT   = True    # exit CE on bearish flip, exit PE on bullish flip
 COUNTER_SIGNAL_THRESH = 0.28    # minimum final score of opposing signal to trigger exit
 MIN_ENTRY_SCORE       = 0.32    # raw signal score must clear this before ML scaling
@@ -70,11 +85,23 @@ SCAN_INTERVAL_SECS    = 60
 
 # ─── Market Regime Filter ─────────────────────────────────────────────────────
 # Only enter when ATR is elevated (trending market) — skip quiet/choppy days.
-# Lesson from PDF: strategies designed for trending timeframes; 5m signals on BTC
-# had 0% win rate vs 67% on 15m. ATR ratio proxies this for intraday.
 ATR_TREND_FILTER    = True
 ATR_TREND_MIN_RATIO = 0.80   # current ATR must be ≥ 80% of its 20-bar average
-                              # below this = market ranging, signals are noise
+
+# ─── India VIX Regime Filter ─────────────────────────────────────────────────
+# India VIX = market fear gauge. High VIX = wide spreads, gap risk, mean-reverting.
+# VIX zones for option buyers:
+#   < 12  : Too low — premiums cheap but directionality weak
+#   12-20 : Sweet spot for directional option buying
+#   > 20  : Elevated fear — widen SL multiplier, reduce position size
+#   > 28  : Extreme fear — block new entries (event risk, gap danger)
+USE_VIX_FILTER          = True
+VIX_SYMBOL              = "NSE:INDIA VIX"   # Kite feed symbol
+VIX_MAX_ENTRY           = 28.0   # block new entries above this
+VIX_HIGH_THRESHOLD      = 20.0   # above this — reduce size by 30%
+VIX_LOW_THRESHOLD       = 12.0   # below this — reduce size by 20% (low vol)
+VIX_SIZE_REDUCTION_HIGH = 0.70   # multiplier when VIX > VIX_HIGH_THRESHOLD
+VIX_SIZE_REDUCTION_LOW  = 0.80   # multiplier when VIX < VIX_LOW_THRESHOLD
 
 # ─── Kronos Deep-Learning Forecasting Filter ──────────────────────────────────
 # Kronos (NeoQuasar/Kronos-small) forecasts next N candles from recent OHLCV.
@@ -120,16 +147,25 @@ STRATEGY_WEIGHTS = {
 }
 SIGNAL_THRESHOLD = 0.28       # min blended score to fire a trade
 
-# ─── Layer 4: Consensus (5 Voters, need 4/5) ────────────────────────────────
+# ─── Layer 4: Consensus (6 Voters, need 4/6) ────────────────────────────────
 # PDF finding: 5/5 unanimous = 67% WR vs 27% for 4/5.
-# Our 5 voters: Trend | Reversion | Breakout | Kronos | ML-Ensemble
-CONSENSUS_VOTES_REQUIRED = 3   # TEMP: lowered from 4 → 3 until Kronos is live
-                               # Kronos always abstains without PyTorch → max was 3/5
-                               # Restore to 4 once Kronos confirms it votes
-N_VOTERS = 5
+# Our 6 voters: Trend | Reversion | Breakout | Kronos | ML | HTF-Alignment
+# HTF voter replaces Kronos dependency — always active, no PyTorch needed.
+CONSENSUS_VOTES_REQUIRED = 4   # restored: 4/6 minimum for trade entry
+N_VOTERS = 6
 
 # Legacy compat
 MIN_AGREEMENT_COUNT = 2        # min technical strategies agreeing (pre-consensus)
+
+# ─── Layer 2: HTF (Higher Timeframe) Alignment Voter ─────────────────────────
+# 15-minute candles fetched in parallel with 5-min candles.
+# HTF voter checks that the 15-min trend agrees before confirming a 5-min signal.
+# Always active — does not depend on Kronos/PyTorch.
+HTF_INTERVAL        = "15minute"   # higher timeframe for confirmation
+HTF_EMA_FAST        = 9            # fast EMA on 15-min
+HTF_EMA_SLOW        = 21           # slow EMA on 15-min
+HTF_SUPERTREND_MULT = 3.0
+HTF_MIN_CONF        = 0.55         # minimum HTF confidence to cast a non-ABSTAIN vote
 
 # ─── Layer 5: Market Filter ───────────────────────────────────────────────────
 ADX_PERIOD          = 14
@@ -140,9 +176,14 @@ VOLUME_FILTER_RATIO = 0.5      # lowered from 1.0 → 0.5 for index data
 
 # ─── Layer 6: Confidence-Based Position Sizing ───────────────────────────────
 # PDF Scenario B: 5/5 unanimous at 20% → +13% in 6 months, 1.4% max drawdown
-POSITION_SIZE_3_OF_5 = 15.0   # % of capital when 3/5 agree (conservative — Kronos absent)
-POSITION_SIZE_4_OF_5 = 20.0   # % of capital when 4/5 agree
-POSITION_SIZE_5_OF_5 = 35.0   # % of capital when all 5 agree (high conviction)
+# Updated for 6-voter system:
+POSITION_SIZE_4_OF_6 = 15.0   # % of capital when 4/6 agree (minimum consensus)
+POSITION_SIZE_5_OF_6 = 22.0   # % of capital when 5/6 agree (strong consensus)
+POSITION_SIZE_6_OF_6 = 35.0   # % of capital when all 6 agree (maximum conviction)
+# Legacy aliases (kept for backward compat)
+POSITION_SIZE_3_OF_5 = 15.0
+POSITION_SIZE_4_OF_5 = 22.0
+POSITION_SIZE_5_OF_5 = 35.0
 
 # ─── Layer 7: ATR-Based Risk ─────────────────────────────────────────────────
 # Stop loss on underlying index (not fixed % of premium — adapts to volatility)
