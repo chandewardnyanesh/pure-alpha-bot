@@ -24,9 +24,10 @@ logger = logging.getLogger(__name__)
 
 
 class RiskManager:
-    def __init__(self):
-        self.current_capital   = INITIAL_CAPITAL
-        self.peak_capital      = INITIAL_CAPITAL
+    def __init__(self, start_capital: float = None):
+        cap = start_capital if start_capital else INITIAL_CAPITAL
+        self.current_capital   = cap
+        self.peak_capital      = cap
         self.daily_pnl         = 0.0
         self.open_positions    = {}    # symbol → position dict
         self.trade_count_today = 0

@@ -1,16 +1,37 @@
 """
-AI Options Trading Bot — Configuration
-Calibrated against live Zerodha account TY3228 (₹39,430 capital, May 2026)
+PureAlpha Bot — Configuration
+Dalio-inspired systematic NSE options trading.
+Live: Zerodha TY3228 (₹39,430) | Paper: ₹1,00,000 → ₹10,00,000
 """
 
 # ─── Capital & Risk ───────────────────────────────────────────────────────────
-INITIAL_CAPITAL           = 39_430       # INR — verified from Kite margins
-MAX_CAPITAL_PER_TRADE_PCT = 40.0         # 40% → ~₹15,772 budget → 1 lot Nifty 3-OTM
-MAX_OPEN_POSITIONS        = 1            # 1 trade at a time (capital constraint)
-MAX_DAILY_LOSS_PCT        = 5.0          # hard stop: ₹1,971 daily loss limit
-BROKERAGE_PER_ORDER       = 20           # flat ₹20 Zerodha
-MAX_PREMIUM_PER_LOT       = 500          # skip option if premium × lot_size > budget
-                                         # prevents Trade-6 type (₹937×30=₹28k = 71% capital)
+INITIAL_CAPITAL           = 39_430       # INR live Zerodha balance
+PAPER_CAPITAL             = 1_00_000    # INR paper trading — journey ₹1L → ₹10L
+MAX_CAPITAL_PER_TRADE_PCT = 40.0
+MAX_OPEN_POSITIONS        = 1
+MAX_DAILY_LOSS_PCT        = 5.0
+BROKERAGE_PER_ORDER       = 20
+MAX_PREMIUM_PER_LOT       = 600          # raised from 500 — ₹1L gives more room
+
+# ─── Data Source ──────────────────────────────────────────────────────────────
+# YFinance = primary (free, no token, bot auto-starts without manual login)
+# Kite     = fallback for OHLCV + sole source for live option LTP / orders
+USE_YFINANCE_PRIMARY = True
+YFINANCE_SYMBOLS = {
+    "NSE:NIFTY 50":   "^NSEI",
+    "NSE:NIFTY BANK": "^NSEBANK",
+    "NSE:INDIA VIX":  "^INDIAVIX",
+}
+# Black-Scholes params for paper-mode option premium estimation
+BS_IV_NIFTY      = 0.14    # ~14% baseline implied vol for Nifty
+BS_IV_BANKNIFTY  = 0.18    # ~18% for BankNifty
+BS_RISK_FREE     = 0.065   # RBI repo rate
+
+# ─── Auto-Scheduler ───────────────────────────────────────────────────────────
+# Bot auto-starts at 09:15 and self-terminates at 15:45 on market days.
+# Controlled by scheduler.py + macOS launchd (see com.purealpha.bot.plist).
+BOT_START_TIME   = "09:15"
+BOT_KILL_TIME    = "15:45"
 
 # ─── Options Instruments ──────────────────────────────────────────────────────
 # Lot sizes VERIFIED from live NFO instrument dump (May 2026 SEBI revision):

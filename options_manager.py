@@ -1,11 +1,15 @@
 """
-Options contract discovery and management.
+PureAlpha Bot — Options Contract Management
+============================================
+Two implementations:
 
-Responsibilities:
-  - Find the right CE/PE contract (symbol, expiry, strike) for a given signal.
-  - Fetch the option chain to pick the most liquid strike.
-  - Track Greeks proxies (moneyness, days-to-expiry).
-  - Detect and handle expiry-day rules.
+PaperOptionsManager  — no Kite needed
+    Synthetic contracts + Black-Scholes premium estimates.
+    Used automatically when running --paper mode.
+
+OptionsManager       — requires live Kite session
+    Uses real NFO instrument list + live LTP from Kite.
+    Used in live trading mode.
 """
 
 import logging
@@ -14,12 +18,12 @@ from datetime import datetime, date, timedelta
 from typing import Optional
 
 import pandas as pd
-from kiteconnect import KiteConnect
 
 from config import (
     OPTION_UNDERLYINGS, STRIKE_OFFSET_WEAK, STRIKE_OFFSET_STRONG,
-    STRONG_SIGNAL_SCORE, SKIP_EXPIRY_DAYS_BEFORE,
+    STRONG_SIGNAL_SCORE, SKIP_EXPIRY_DAYS_BEFORE, MAX_CAPITAL_PER_TRADE_PCT,
 )
+from data_fetcher import get_bs_premium
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +31,116 @@ logger = logging.getLogger(__name__)
 UNDERLYING_MAP = {u["name"]: u for u in OPTION_UNDERLYINGS}
 
 
+# ─── Paper Options Manager (no Kite needed) ────────────────────────────────────
+
+class PaperOptionsManager:
+    """
+    Synthetic option contract selection for paper trading.
+    Generates standard NSE weekly option tradingsymbols and prices them
+    via Black-Scholes using the current spot fetched from YFinance.
+
+    Fully offline — zero Kite dependency.
+    """
+
+    def __init__(self, fetcher=None):
+        self.fetcher = fetcher   # DataFetcherYF instance
+
+    def refresh_instruments(self):
+        pass   # no instrument list needed
+
+    def _get_spot(self, underlying_name: str) -> float:
+        cfg    = UNDERLYING_MAP[underlying_name]
+        symbol = cfg["index"]
+        if self.fetcher and hasattr(self.fetcher, "get_current_spot"):
+            return self.fetcher.get_current_spot(symbol)
+        return 0.0
+
+    @staticmethod
+    def nearest_strike(spot: float, step: int, offset: int,
+                       option_type: str) -> int:
+        atm = round(spot / step) * step
+        if option_type == "CE":
+            return int(atm + offset * step)
+        return int(atm - offset * step)
+
+    def _next_expiry(self) -> date:
+        """Next weekly Thursday expiry at least SKIP_EXPIRY_DAYS_BEFORE away."""
+        today  = date.today()
+        cutoff = today + timedelta(days=SKIP_EXPIRY_DAYS_BEFORE)
+        d      = cutoff
+        while d.weekday() != 3:   # Thursday = 3
+            d += timedelta(days=1)
+        return d
+
+    @staticmethod
+    def _make_symbol(underlying: str, expiry: date,
+                     strike: int, option_type: str) -> str:
+        """NSE format: NIFTY25JUN23500CE"""
+        MONTHS = {1:"JAN",2:"FEB",3:"MAR",4:"APR",5:"MAY",6:"JUN",
+                  7:"JUL",8:"AUG",9:"SEP",10:"OCT",11:"NOV",12:"DEC"}
+        yr  = str(expiry.year)[2:]
+        mon = MONTHS[expiry.month]
+        return f"{underlying}{yr}{mon}{strike}{option_type}"
+
+    def select_option_contract(
+        self,
+        underlying_name: str,
+        signal_action: str,
+        signal_score: float,
+        capital: float,
+    ) -> Optional[dict]:
+        cfg         = UNDERLYING_MAP[underlying_name]
+        lot_size    = cfg["lot_size"]
+        strike_step = cfg["strike_step"]
+        exchange    = cfg["exchange"]
+        option_type = "CE" if signal_action == "BUY" else "PE"
+
+        spot = self._get_spot(underlying_name)
+        if spot <= 0:
+            logger.warning(f"[PAPER] {underlying_name}: spot=0 — skip")
+            return None
+
+        expiry         = self._next_expiry()
+        days_to_expiry = max((expiry - date.today()).days, 1)
+        offset         = (STRIKE_OFFSET_STRONG if signal_score >= STRONG_SIGNAL_SCORE
+                          else STRIKE_OFFSET_WEAK)
+        strike         = self.nearest_strike(spot, strike_step, offset, option_type)
+
+        premium  = get_bs_premium(underlying_name, spot, strike,
+                                  option_type, days_to_expiry)
+        if premium <= 0:
+            return None
+
+        symbol   = self._make_symbol(underlying_name, expiry, strike, option_type)
+        lot_cost = premium * lot_size
+        max_lots = max(1, int(capital * MAX_CAPITAL_PER_TRADE_PCT / 100 / lot_cost))
+
+        logger.info(
+            f"[PAPER] {symbol} spot={spot:.0f} K={strike} "
+            f"prem=₹{premium:.2f} DTE={days_to_expiry} (BS)"
+        )
+
+        return {
+            "tradingsymbol":    symbol,
+            "exchange":         exchange,
+            "instrument_token": 0,
+            "lot_size":         lot_size,
+            "strike":           strike,
+            "expiry":           expiry,
+            "option_type":      option_type,
+            "premium":          premium,
+            "lot_cost":         lot_cost,
+            "max_lots":         max_lots,
+            "underlying_name":  underlying_name,
+            "spot_price":       spot,
+            "days_to_expiry":   days_to_expiry,
+            "signal_action":    signal_action,
+            "entry_atr":        0,
+        }
+
+
 class OptionsManager:
-    def __init__(self, kite: KiteConnect):
+    def __init__(self, kite):
         self.kite = kite
         # Cache: exchange → list of instrument dicts for NFO/BFO
         self._instruments: dict[str, list] = {}

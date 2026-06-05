@@ -30,22 +30,23 @@ from config import (
     OPTION_UNDERLYINGS, SCAN_INTERVAL_SECS,
     MARKET_OPEN, MARKET_CLOSE, SQUARE_OFF_TIME,
     NO_ENTRY_AFTER, NO_ENTRY_BEFORE,
-    INITIAL_CAPITAL, LOG_PATH, LOG_LEVEL, BROKERAGE_PER_ORDER,
+    INITIAL_CAPITAL, PAPER_CAPITAL,
+    LOG_PATH, LOG_LEVEL, BROKERAGE_PER_ORDER,
     OPTION_MIDDAY_SL, MIDDAY_CUT_HOUR,
     COUNTER_SIGNAL_EXIT, COUNTER_SIGNAL_THRESH,
     USE_KRONOS_FILTER, KRONOS_LOOKBACK,
     CONSENSUS_VOTES_REQUIRED,
     STATUS_FILE,
-    USE_VIX_FILTER, VIX_SYMBOL,
+    USE_VIX_FILTER,
 )
 from broker          import Broker
-from data_fetcher    import DataFetcher
+from data_fetcher    import DataFetcher, DataFetcherYF
 from indicators      import compute_all, extract_features
 from signal_layers   import run_all_voters, VOTE_BUY, VOTE_SELL
 from consensus       import run_consensus
 from market_filter   import check_market_filter, filter_status, update_vix, get_vix_size_multiplier
 from ml_ensemble     import MLEnsemble
-from options_manager import OptionsManager
+from options_manager import OptionsManager, PaperOptionsManager
 from risk_manager    import RiskManager
 from kronos_filter   import KronosFilter
 from dashboard_server import write_status
@@ -68,6 +69,10 @@ logger = logging.getLogger("bot")
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
+# Map underlying name → its index feed symbol (for paper-mode spot lookup)
+UNDERLYING_MAP_INDEX = {cfg["name"]: cfg["index"] for cfg in OPTION_UNDERLYINGS}
+
+
 def now_hhmm() -> str:
     return datetime.now().strftime("%H:%M")
 
@@ -87,9 +92,14 @@ def squareoff_due() -> bool:
 class PureAlphaBot:
     def __init__(self, paper_trade: bool = False):
         self.paper = paper_trade
+        # Paper uses ₹1L capital; live uses real Zerodha balance
+        start_capital = PAPER_CAPITAL if paper_trade else INITIAL_CAPITAL
+
         logger.info("=" * 70)
-        logger.info(f"  PUREALPHA BOT  |  Dalio-Inspired 6-Layer Architecture  |  paper={paper_trade}")
-        logger.info(f"  {date.today()}   Capital: ₹{INITIAL_CAPITAL:,.0f} → Target: ₹10,00,000")
+        logger.info(f"  PUREALPHA BOT  |  Dalio 6-Layer Architecture  |  "
+                    f"{'📄 PAPER' if paper_trade else '🔴 LIVE'}")
+        logger.info(f"  {date.today()}  Capital: ₹{start_capital:,.0f} → Target: ₹10,00,000")
+        logger.info(f"  Data: {'YFinance (primary)' if paper_trade else 'YFinance + Kite fallback'}")
         logger.info("=" * 70)
         logger.info("  L1:Data(5m+15m+VIX)  L2:6-Voters  L3:Filter(VIX+Session+ATR)")
         logger.info("  L4:Consensus(4/6)    L5:Sizing    L6:ATR-Risk+PartialExit")
@@ -97,15 +107,25 @@ class PureAlphaBot:
 
         tl.init_db()
 
-        self.broker   = Broker()
-        self.fetcher  = DataFetcher(self.broker.kite)
-        self.opts_mgr = OptionsManager(self.broker.kite)
-        self.risk_mgr = RiskManager()
+        # ── Paper mode: 100% YFinance, no Kite token needed ───────────────────
+        if paper_trade:
+            self.broker   = None
+            self.fetcher  = DataFetcherYF()
+            self.opts_mgr = PaperOptionsManager(fetcher=self.fetcher)
+            logger.info("📄 Paper mode: YFinance data + Black-Scholes pricing")
+        else:
+            # Live mode: YF candles + Kite for option LTP/orders
+            self.broker   = Broker()
+            self.fetcher  = DataFetcher(self.broker.kite)
+            self.opts_mgr = OptionsManager(self.broker.kite)
+            logger.info("🔴 Live mode: YFinance candles + Kite for orders")
+
+        self.risk_mgr = RiskManager(start_capital=start_capital)
         self.ml       = MLEnsemble()
         self.kronos   = KronosFilter() if USE_KRONOS_FILTER else None
 
         self.active: dict[str, dict] = {}
-        self.capital_at_open = INITIAL_CAPITAL
+        self.capital_at_open = start_capital
         self.squaredoff      = False
         self.running         = True
         self._signal_log     = []   # for dashboard
@@ -127,14 +147,17 @@ class PureAlphaBot:
         self.opts_mgr.refresh_instruments()
         self.fetcher.warmup()
 
-        try:
-            cap = self.broker.get_available_capital()
-            if cap > 0:
-                self.risk_mgr.update_capital(cap)
-                self.capital_at_open = cap
-                logger.info(f"Available capital: ₹{cap:,.2f}")
-        except Exception as e:
-            logger.warning(f"Capital fetch failed: {e} — using config value")
+        if self.paper:
+            logger.info(f"📄 Paper capital: ₹{self.capital_at_open:,.0f} (no Kite login needed)")
+        else:
+            try:
+                cap = self.broker.get_available_capital()
+                if cap > 0:
+                    self.risk_mgr.update_capital(cap)
+                    self.capital_at_open = cap
+                    logger.info(f"Live capital from Kite: ₹{cap:,.2f}")
+            except Exception as e:
+                logger.warning(f"Capital fetch failed: {e} — using config value")
 
         logger.info("Startup complete. Entering main loop.")
 
@@ -371,7 +394,21 @@ class PureAlphaBot:
         pos      = entry["pos"]
         exchange = pos["exchange"]
 
-        current_premium = self.fetcher.get_option_ltp(symbol, exchange)
+        if self.paper:
+            # Paper mode: re-price via Black-Scholes using current spot
+            spot_sym        = UNDERLYING_MAP_INDEX.get(pos.get("underlying", ""), "")
+            cur_spot        = self.fetcher.get_current_spot(spot_sym) if spot_sym else current_spot
+            current_premium = self.fetcher.get_option_ltp(
+                symbol, exchange,
+                spot=cur_spot,
+                strike=pos.get("strike", 0),
+                option_type=pos.get("option_type", "CE"),
+                days_to_expiry=pos.get("days_to_expiry", 7),
+                underlying=pos.get("underlying", "NIFTY"),
+            )
+        else:
+            current_premium = self.fetcher.get_option_ltp(symbol, exchange)
+
         if current_premium <= 0:
             return
 
@@ -618,10 +655,11 @@ class PureAlphaBot:
             # ── Fetch and cache India VIX for regime filter ───────────────────
             if USE_VIX_FILTER:
                 try:
-                    vix_data = self.broker.kite.ltp([VIX_SYMBOL])
-                    vix_val  = float(vix_data[VIX_SYMBOL]["last_price"])
-                    update_vix(vix_val)
-                    logger.debug(f"India VIX: {vix_val:.2f}")
+                    # Both DataFetcherYF and DataFetcher expose get_vix()
+                    vix_val = self.fetcher.get_vix()
+                    if vix_val > 0:
+                        update_vix(vix_val)
+                        logger.debug(f"India VIX: {vix_val:.2f}")
                 except Exception as e:
                     logger.debug(f"VIX fetch failed: {e}")
 
