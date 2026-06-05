@@ -215,7 +215,7 @@ ATR_TRAIL_DIST       = 1.5    # trail by 1.5 × ATR from peak
 # ─── ML Model ─────────────────────────────────────────────────────────────────
 MIN_TRAINING_SAMPLES      = 20
 MODEL_RETRAIN_EVERY       = 5
-MODEL_PATH                = "models/rf_model.pkl"
+MODEL_PATH                = "models/purealpha_rf.pkl"
 FEATURE_IMPORTANCE_THRESHOLD = 0.01
 
 # ─── Candle Data ──────────────────────────────────────────────────────────────
@@ -223,13 +223,15 @@ LIVE_INTERVAL    = "5minute"
 HISTORICAL_DAYS  = 30
 
 # ─── Dashboard ────────────────────────────────────────────────────────────────
-DASHBOARD_PORT = 5001
+# Port 5002 — original bot uses 5001, both run in parallel without conflict
+DASHBOARD_PORT = 5002
 DASHBOARD_HOST = "127.0.0.1"
-STATUS_FILE    = "data/status.json"
+STATUS_FILE    = "data/purealpha_status.json"
 
 # ─── Logging / DB ─────────────────────────────────────────────────────────────
-DB_PATH   = "data/trades.db"
-LOG_PATH  = "logs/bot.log"
+# Separate paths so both bots' data stay fully isolated
+DB_PATH   = "data/purealpha_trades.db"
+LOG_PATH  = "logs/purealpha.log"
 LOG_LEVEL = "INFO"
 
 # ─── Capital scaling guide ────────────────────────────────────────────────────
